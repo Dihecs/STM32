@@ -1,0 +1,98 @@
+#include "stm32f10x.h"
+#include <stdio.h>
+
+void uart_send_char(char c) {
+    while (!(USART1->SR & USART_SR_TXE));
+    USART1->DR = c;
+}
+
+void uart_send_str(const char* str) {
+    while (*str) uart_send_char(*str++);
+}
+
+void delay(volatile uint32_t t) {
+    while (t--) __NOP();
+}
+
+// === PWM ?? PA8: 72 MHz / (PSC+1) / (ARR+1) ===
+void pwm_init(void) {
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
+    RCC->APB2ENR |= RCC_APB2ENR_TIM1EN;
+
+    GPIOA->CRH &= ~(GPIO_CRH_MODE8 | GPIO_CRH_CNF8);
+    GPIOA->CRH |= GPIO_CRH_MODE8_1 | GPIO_CRH_MODE8_0;  // 50 ???
+    GPIOA->CRH |= GPIO_CRH_CNF8_1;
+
+    TIM1->PSC = 0;      // ???????????? 1 (72 ???)
+    TIM1->ARR = 8 - 1;  // ??????? = 72 / 8 = 9 ???
+    TIM1->CCR1 = 4;     // 50% ??????????
+
+    TIM1->CCMR1 |= (6 << 4);       // PWM mode 1
+    TIM1->CCER  |= TIM_CCER_CC1E;  // Enable CH1
+    TIM1->BDTR  |= TIM_BDTR_MOE;
+    TIM1->CR1   |= TIM_CR1_CEN;
+}
+
+void uart_init(void) {
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_USART1EN;
+    GPIOA->CRH &= ~(0xF << 4);
+    GPIOA->CRH |=  (0xB << 4);
+    USART1->BRR = 625;
+    USART1->CR1 |= USART_CR1_TE | USART_CR1_UE;
+}
+
+void adc_init(void) {
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+    GPIOA->CRL &= ~(0xF << 0); // PA0 ??????
+    ADC1->SMPR2 |= 7 << 0;     // ??????? ???????
+    ADC1->SQR3 = 0;
+    ADC1->CR2 |= ADC_CR2_ADON;
+    delay(10000);
+    ADC1->CR2 |= ADC_CR2_CAL;
+    while (ADC1->CR2 & ADC_CR2_CAL);
+}
+
+uint32_t adc_read_mv(void) {
+    ADC1->CR2 |= ADC_CR2_ADON;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    while (!(ADC1->SR & ADC_SR_EOC));
+    uint16_t raw = ADC1->DR;
+    return (raw * 3300UL) / 4095;
+}
+
+// ??????? ????????? ? dBm ? ???????? intercept
+int32_t mv_to_dbm(uint32_t mv, float intercept) {
+    float v = mv / 1000.0f;
+    float slope = -0.025f;
+    return (int32_t)((v - intercept) / slope);
+}
+
+int main(void) {
+    uart_init();
+    pwm_init(); // ?????????? ??????
+    adc_init();
+
+    uart_send_str("=== ?????????? ===\r\n");
+
+    // === ??????????????: ????????? ??????? ??????? ?? 0 dBm ===
+    const int32_t ref_dbm = 0;
+    uint32_t mv_now = adc_read_mv();
+    float v_now = mv_now / 1000.0f;
+    float slope = -0.025f;
+    float intercept = v_now - (slope * ref_dbm); // ? ??? ????? 0 dBm
+
+    char str[64];
+    sprintf(str, "Intercept set: %.3f V (mv = %lu)\r\n", intercept, mv_now);
+    uart_send_str(str);
+
+    // === ???????? ???? ===
+    while (1) {
+        uint32_t mv = adc_read_mv();
+        int32_t dbm = mv_to_dbm(mv, intercept);
+
+        sprintf(str, "%4lu mV  = %4ld dBm\r\n", mv, dbm);
+        uart_send_str(str);
+
+        delay(1000000);
+    }
+}
